@@ -20,7 +20,7 @@ A Taylor–series ODE solver library for Maxima. It computes truncated power-ser
 2. In Maxima:
    ```maxima
    load("asymptotics.mac")$
-````
+   ```
 
 ## API
 
