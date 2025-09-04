@@ -1,0 +1,348 @@
+/* ========================================================================
+ *  asymptotics.mac
+ *  Phase 1 (MVP): Taylor-series solver for 1st-order explicit ODEs
+ *
+ *  Public API:
+ *    asymptotic_ode_solve(equation, dep_var(indep_var), expansion_point, order, [IC])
+ *      -> symbolic truncated series as a polynomial (sum with rational coeffs)
+ *
+ *  Highlights:
+ *   - Solves y' = h(x,y) and builds y^(k) by total differentiation.
+ *   - Robust canonicalization of noun derivatives (no nesting, numeric orders).
+ *   - Two-stage derivative substitution per step:
+ *       Stage A: repeatedly apply all high-order rules (k>=2) to a fixed point.
+ *       Stage B: apply first-derivative rules (y'(x)) once at the end.
+ *   - Only ratsimp scalar derivative values; never rat/ratsimp the final series.
+ *   - Final expand → clean sum with rational coefficients (copy-paste friendly).
+ *   - Loop bounds are coerced to integers (fixes the “Unable to evaluate predicate …” error).
+ *   - Optional debug logging via asym_debug:true$.
+ * ======================================================================== */
+
+/* ---------- Debug utilities ---------- */
+if not boundp('asym_debug) then asym_debug : false$
+
+asym_dbg(label, expr) := block([],
+    if asym_debug then printf(true, "~a: ~a~%", label, string(expr))
+)$
+
+/* ---------- Small helper: coerce something to a small nonnegative integer ---------- */
+asym_int(n, default_val) := block(
+    [simp:true, v],
+    v : ev(n),               /* force simplification */
+    if integerp(v) then return(v)
+    else if numberp(v) then return(fix(v))
+    else return(default_val) /* fallback */
+)$
+
+/* ---------- Canonicalize noun derivatives ----------
+   1) Promote 'diff(y(x),x) → 'diff(y(x),x,1)
+   2) Collapse one nesting layer per pass using buildq so (m+1) is numeric.
+*/
+asym_canonicalize_diffs(expr, dep_var_func, x, max_order_guess) := block(
+    [e, pass, m, mo],
+    e  : expr,
+    mo : asym_int(max_order_guess, 8),    /* ensure integer bound */
+
+    /* Make 1st-order explicit */
+    e : subst('diff(dep_var_func, x) = 'diff(dep_var_func, x, 1), e),
+
+    /* Collapse nesting with numeric orders */
+    for pass : 1 thru mo do (
+        for m : 0 thru mo do (
+            e : subst(
+                buildq([dep_var_func, x, m], 'diff('diff(dep_var_func, x, m), x, 1)) =
+                buildq([dep_var_func, x, m], 'diff(dep_var_func, x, m + 1)),
+                e
+            )
+        )
+    ),
+    e
+)$
+
+/* ---------- Two-stage derivative substitution ----------
+   Stage A: iterate {canonicalize; subst(hi_rules)} until no change (fixed point).
+   Stage B: canonicalize once more; then subst(lo_rules) once.
+   Loop bounds are concretized to integers.
+*/
+asym_apply_deriv_substs_two_stage(expr, dep_var_func, x, hi_rules, lo_rules, max_order_guess) := block(
+    [e : expr, prev, pass, mo, max_passes],
+    mo         : asym_int(max_order_guess, 8),
+    max_passes : 5*mo + 10,               /* numeric now */
+
+    /* Stage A: high-order only, to fixed point */
+    for pass : 1 thru max_passes do (
+        e    : asym_canonicalize_diffs(e, dep_var_func, x, mo),
+        prev : e,
+        e    : subst(hi_rules, e),
+        if e = prev then break
+    ),
+
+    /* Stage B: first-derivative once (after canonicalization) */
+    e : asym_canonicalize_diffs(e, dep_var_func, x, mo),
+    e : subst(lo_rules, e),
+    e
+)$
+
+/* ---------- Helper: final formatting ----------
+   Ensure the final result is a sum with rational coefficients (no single big fraction).
+   DO NOT rat/ratsimp the whole series; just expand to open (x - x0)^k. */
+asym_format_sum(expr) := block(
+    [out],
+    out : expand(expr),
+    asym_dbg("format: expanded", out),
+    out
+)$
+
+/* Optional convenience: string-returning wrapper */
+asymptotic_ode_solve_str(equation, dep_var_func, expansion_point, order, initial_condition) := block(
+    [res],
+    res : asymptotic_ode_solve(equation, dep_var_func, expansion_point, order, initial_condition),
+    string(res)
+)$
+
+/* ========================================================================
+ *  Core solver (MVP): asymptotic_ode_solve
+ * ======================================================================== */
+asymptotic_ode_solve(equation, dep_var_func, expansion_point, order, initial_condition) := block(
+    /* locals */
+    [y, x, x0, y0, N, sol_rules, h_expr, k, expr_k, val_k,
+     dep_at_x0, solution, hi_rules, lo_rules, tmp1, tmp2, kill_consts],
+
+    /* ---------- 1) Input parsing & validation ---------- */
+    if atom(dep_var_func) then
+        error("dep_var(indep_var) must be a function call like y(x)"),
+
+    if length(args(dep_var_func)) # 1 then
+        error("dep_var(indep_var) must have exactly one argument"),
+
+    y : op(dep_var_func),
+    x : args(dep_var_func)[1],
+
+    if op(expansion_point) # "=" then
+        error("expansion_point must be an equation, e.g., x = 0"),
+
+    if lhs(expansion_point) # x then
+        error("expansion_point variable must match the independent variable"),
+
+    x0 : rhs(expansion_point),
+
+    if not (integerp(order) and order >= 0) then
+        error("order must be a non-negative integer"),
+    N : order,
+
+    if not (listp(initial_condition) and length(initial_condition) = 1) then
+        error("initial_condition must be a list with exactly one equation"),
+
+    if op(initial_condition[1]) # "=" then
+        error("initial_condition must be an equation, e.g., y(0) = 1"),
+
+    dep_at_x0 : subst(x = x0, dep_var_func),
+    if lhs(initial_condition[1]) # dep_at_x0 then
+        error("initial_condition must specify the value of the dependent function at the expansion point"),
+
+    y0 : rhs(initial_condition[1]),
+
+    asym_dbg("parse: dep var", y),
+    asym_dbg("parse: indep var", x),
+    asym_dbg("parse: x0", x0),
+    asym_dbg("parse: y0", y0),
+    asym_dbg("parse: order", N),
+
+    /* ---------- 2) Isolate y' = h(x, y) ---------- */
+    sol_rules : if op(equation) = "="
+                 then solve(equation, 'diff(dep_var_func, x))
+                 else solve(equation = 0, 'diff(dep_var_func, x)),
+
+    if sol_rules = [] then
+        error("Cannot solve the equation for the first derivative diff(~a,~a)", dep_var_func, x),
+
+    h_expr : rhs(sol_rules[1]),
+    asym_dbg("isolate: h(x,y)", h_expr),
+
+    /* ---------- 3) Initialize accumulators ---------- */
+    solution : y0,       /* a0 term */
+    hi_rules : [],       /* high-order derivative rules (k>=2) */
+    lo_rules : [],       /* first-derivative rules */
+
+    /* ---------- 4) Iterative coefficient calculation ---------- */
+    /* Base: a1 from h(x0, y0) if N >= 1 */
+    if N >= 1 then (
+        expr_k : h_expr,  /* y'(x) = h(x, y(x)) */
+
+        /* y'(x0) = h(x0, y0) */
+        tmp1  : subst(dep_var_func = y0, expr_k),
+        val_k : ratsimp(subst(x = x0, tmp1)),
+
+        /* record *first-derivative* rules only in lo_rules */
+        lo_rules : cons('diff(dep_var_func, x, 1) = val_k, lo_rules),
+        lo_rules : cons('diff(dep_var_func, x    ) = val_k, lo_rules),
+
+        /* a1 term */
+        solution : solution + val_k * (x - x0),
+
+        asym_dbg("k=1: y'(x) expr", expr_k),
+        asym_dbg("k=1: y'(x0)", val_k),
+        asym_dbg("k=1: term", val_k * (x - x0))
+    ),
+
+    /* Higher orders: for k = 2..N, expr_k holds d^(k-1)/dx^(k-1) h(x, y(x)) */
+    for k : 2 thru N do (
+        /* Differentiate previous expr */
+        expr_k : diff(expr_k, x),
+
+        /* Stage-substitute known derivatives: high-order to fixed point, then first-derivative once */
+        tmp1 : asym_apply_deriv_substs_two_stage(expr_k, dep_var_func, x, hi_rules, lo_rules, k+2),
+
+        /* Substitute y(x) = y0, but do NOT set x yet. */
+        tmp2 : subst(dep_var_func = y0, tmp1),
+
+        /* Kill any leftover noun diffs of constants: 'diff(y0, x, n) = 0 and 'diff(1, x, n) = 0 */
+        kill_consts : [],
+        for nnn : 1 thru k do (
+            kill_consts : cons(buildq([y0, x, nnn], 'diff(y0, x, nnn) = 0), kill_consts),
+            kill_consts : cons(buildq([x,  nnn],     'diff(1,  x, nnn) = 0), kill_consts)
+        ),
+        tmp2 : subst(kill_consts, tmp2),
+
+        /* Finally set x = x0 and simplify the scalar y^(k)(x0) */
+        val_k : ratsimp(subst(x = x0, tmp2)),
+
+        /* Record this derivative value into *high-order* rules (canonical + one-step nested) */
+        hi_rules : cons('diff(dep_var_func, x, k) = val_k, hi_rules),
+        hi_rules : cons('diff('diff(dep_var_func, x, k-1), x, 1) = val_k, hi_rules),
+
+        /* Accumulate the a_k term */
+        solution : solution + (val_k / factorial(k)) * (x - x0)^k,
+
+        asym_dbg(sconcat("k=", k, ": expr after 2-stage"), tmp1),
+        asym_dbg(sconcat("k=", k, ": y^(", k, ")(x0)"), val_k),
+        asym_dbg(sconcat("k=", k, ": term"),
+                 (val_k / factorial(k)) * (x - x0)^k)
+    ),
+
+    asym_dbg("solution (raw)", solution),
+
+    /* ---------- 5) Return (formatted as sum with rational coefficients) ---------- */
+    asym_format_sum(solution)
+)$
+
+/* -----------------------------------------------------------
+   Example (spec §3.3):
+
+   (%i1) load("asymptotics.mac")$
+   (%i2) display2d:false$
+   (%i3) asymptotic_ode_solve('diff(y(x),x) = x + y(x)^2, y(x), x=0, 3, [y(0)=1]);
+   => 1 + x + (3/2)*x^2 + (4/3)*x^3
+   ----------------------------------------------------------- */
+
+/* (Optional) quick self-test */
+test_hardcoded_example() := block(
+    [res, exp],
+    print("Testing y' = x + y^2 with y(0)=1, order 3"),
+    res : asymptotic_ode_solve('diff(y(x),x) = x + y(x)^2, y(x), x=0, 3, [y(0)=1]),
+    exp : 1 + x + (3/2)*x^2 + (4/3)*x^3,
+    print(sconcat("Result:   ", string(res))),
+    print(sconcat("Expected: ", string(exp))),
+    res
+)$
+
+/* -------- Validator: check residual up to given order-1 --------
+   For a truncated series of 'order' (highest power), the residual
+   r(x) = y_series'(x) - h(x, y_series(x))
+   should satisfy r^(j)(x0) = 0 for j = 0..order-1.
+*/
+asymptotic_ode_check(equation, dep_var_func, expansion_point, order, initial_condition) := block(
+  [x, x0, yser, sol_h, h_expr, r, j, val, ok:true, upto],
+  x  : args(dep_var_func)[1],
+  x0 : rhs(expansion_point),
+  yser : asymptotic_ode_solve(equation, dep_var_func, expansion_point, order, initial_condition),
+
+  /* isolate y' = h(x,y) exactly like the solver does */
+  sol_h : if op(equation) = "="
+          then solve(equation, 'diff(dep_var_func, x))
+          else solve(equation = 0, 'diff(dep_var_func, x)),
+  if sol_h = [] then return(false),
+  h_expr : rhs(sol_h[1]),
+
+  /* residual */
+  r : diff(yser, x) - subst(dep_var_func = yser, h_expr),
+
+  /* vanish up to order-1 (not order) */
+  upto : max(order - 1, 0),
+  for j:0 thru upto do (
+    val : ratsimp( subst(x = x0, diff(r, x, j)) ),
+    if val # 0 then ( ok:false, print(sconcat("Residual failure at order ", j, ": ", string(val))) )
+  ),
+  ok
+)$
+
+/* -------- Compact assertion helper -------- */
+asym_expect(expr, expect) := block([],
+  if ratsimp(expr - expect) # 0 then (print("Expected:", string(expect)), false) else true
+)$
+
+/* -------- Automatic test suite (Phase 1 MVP) -------- */
+asym_mvp_test_suite() := block(
+  [ok:true, tmp, x, oldd2d],
+  oldd2d : display2d,     /* save current setting */
+  display2d : false,      /* linear, copy-paste friendly output */
+  print("--- asymptotics.mac MVP test suite ---"),
+
+  /* 1) Spec example */
+  tmp : asymptotic_ode_solve('diff(y(x),x) = x + y(x)^2, y(x), x=0, 3, [y(0)=1]),
+  ok  : ok and asym_expect(tmp, 1 + x + (3/2)*x^2 + (4/3)*x^3),
+  ok  : ok and asymptotic_ode_check('diff(y(x),x) = x + y(x)^2, y(x), x=0, 3, [y(0)=1]),
+
+  /* 2) e^x truncated */
+  tmp : asymptotic_ode_solve('diff(y(x),x) = y(x), y(x), x=0, 4, [y(0)=1]),
+  ok  : ok and asym_expect(tmp, 1 + x + x^2/2 + x^3/6 + x^4/24),
+  ok  : ok and asymptotic_ode_check('diff(y(x),x) = y(x), y(x), x=0, 4, [y(0)=1]),
+
+  /* 3) y' = x, y(0)=0 */
+  tmp : asymptotic_ode_solve('diff(y(x),x) = x, y(x), x=0, 3, [y(0)=0]),
+  ok  : ok and asym_expect(tmp, x^2/2),
+  ok  : ok and asymptotic_ode_check('diff(y(x),x) = x, y(x), x=0, 3, [y(0)=0]),
+
+  /* 4) Nonzero expansion point: y' = x^2, y(1)=2 around x0=1, order 4
+        Expected: 2 + (x-1) + (x-1)^2 + (1/3)*(x-1)^3
+  */
+  tmp : asymptotic_ode_solve('diff(y(x),x) = x^2, y(x), x=1, 4, [y(1)=2]),
+  ok  : ok and asym_expect(tmp, 2 + (x-1) + (x-1)^2 + (1/3)*(x-1)^3),
+  ok  : ok and asymptotic_ode_check('diff(y(x),x) = x^2, y(x), x=1, 4, [y(1)=2]),
+
+  /* 5) y' = x*y, y(0)=1 → y = exp(x^2/2)
+        Series: 1 + x^2/2 + x^4/8 + x^6/48
+  */
+  tmp : asymptotic_ode_solve('diff(y(x),x) = x*y(x), y(x), x=0, 6, [y(0)=1]),
+  ok  : ok and asym_expect(tmp, 1 + x^2/2 + x^4/8 + x^6/48),
+  ok  : ok and asymptotic_ode_check('diff(y(x),x) = x*y(x), y(x), x=0, 6, [y(0)=1]),
+
+  /* 6) y' = y^2, y(0)=1 → y = 1/(1-x) = 1 + x + x^2 + x^3 + x^4 + ... (check to order 4) */
+  tmp : asymptotic_ode_solve('diff(y(x),x) = y(x)^2, y(x), x=0, 4, [y(0)=1]),
+  ok  : ok and asym_expect(tmp, 1 + x + x^2 + x^3 + x^4),
+  ok  : ok and asymptotic_ode_check('diff(y(x),x) = y(x)^2, y(x), x=0, 4, [y(0)=1]),
+
+  /* 7) Linear inhomogeneous: y' = y + sin(x), y(0)=0 (order 5) — residual only */
+  ok  : ok and asymptotic_ode_check('diff(y(x),x) = y(x) + sin(x), y(x), x=0, 5, [y(0)=0]),
+
+  /* Error-handling checks (expecting errors) */
+  block([caught:false],
+    /* mismatched IC point */
+    caught : (errcatch( asymptotic_ode_solve('diff(y(x),x) = x, y(x), x=0, 2, [y(1)=0]) ) = []),
+    ok : ok and caught
+  ),
+  block([caught:false],
+    /* truly unsolvable for y': equation has NO derivative at all */
+    caught : (errcatch( asymptotic_ode_solve(y(x) = x^2 + 1, y(x), x=0, 2, [y(0)=0]) ) = []),
+    ok : ok and caught
+  ),
+  block([caught:false],
+    /* negative order */
+    caught : (errcatch( asymptotic_ode_solve('diff(y(x),x) = x, y(x), x=0, -1, [y(0)=0]) ) = []),
+    ok : ok and caught
+  ),
+
+  print("--- Test suite result:", if ok then "ALL PASS ✅" else "FAILED ❌"),
+  display2d : oldd2d,  /* restore */
+  ok
+)$
