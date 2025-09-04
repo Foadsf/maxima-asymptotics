@@ -93,6 +93,134 @@ asym_format_sum(expr) := block(
     out
 )$
 
+/* ---------- Helper: detect highest derivative order present (robust, loop-safe) ----------
+   Strategy on a *canonicalized* equation:
+     1) structural scan (asym_max_deriv_order on both sides)
+     2) freeof scan for 'diff(y(x),x,k), k=mo..2  (keep first/top-most match)
+     3) solve probe for y^(k), k=mo..2           (keep first/top-most match)
+     4) finally try order 1 ('diff(y(x),x) and 'diff(y(x),x,1))
+   Emits debug logs when asym_debug:true$.
+*/
+asym_detect_highest_order(expr, dep_var_func, x, max_guess) := block(
+    [mo, eqn0, lhs_can, rhs_can, eqn_can, n_struct,
+     k, sol, found:false, k_freeof:0, k_solve:0],
+
+    mo   : asym_int(max_guess, 16),
+    eqn0 : if op(expr) = "=" then expr else (expr = 0),
+
+    /* Canonicalize both sides to collapse nested diffs, make orders numeric */
+    lhs_can : asym_canonicalize_diffs(lhs(eqn0), dep_var_func, x, mo),
+    rhs_can : asym_canonicalize_diffs(rhs(eqn0), dep_var_func, x, mo),
+    eqn_can : lhs_can = rhs_can,
+
+    asym_dbg("detect: eqn canonical LHS", lhs_can),
+    asym_dbg("detect: eqn canonical RHS", rhs_can),
+
+    /* 1) structural scan */
+    n_struct : max(
+        asym_max_deriv_order(lhs_can, dep_var_func, x),
+        asym_max_deriv_order(rhs_can, dep_var_func, x)
+    ),
+    asym_dbg("detect: structural n", n_struct),
+    if n_struct >= 2 then return(n_struct),
+
+    /* 2) freeof scan: look for explicit 'diff(y(x),x,k) (take first found from top) */
+    found : false, k_freeof : 0,
+    for k : mo thru 2 step -1 do (
+        if not freeof('diff(dep_var_func, x, k), eqn_can) and not found then (
+            k_freeof : k, found : true
+        )
+    ),
+    if found then (asym_dbg("detect: freeof chose k", k_freeof), return(k_freeof)),
+
+    /* 3) solve probe: can solve for y^(k)? (take first found from top) */
+    found : false, k_solve : 0,
+    for k : mo thru 2 step -1 do (
+        sol : solve(eqn_can, 'diff(dep_var_func, x, k)),
+        if sol # [] and not found then (k_solve : k, found : true)
+    ),
+    if found then (asym_dbg("detect: solve chose k", k_solve), return(k_solve)),
+
+    /* 4) order 1 forms */
+    if solve(eqn_can, 'diff(dep_var_func, x)) # [] then (
+        asym_dbg("detect: order=1 via diff(y,x)", true), return(1)
+    ),
+    if solve(eqn_can, 'diff(dep_var_func, x, 1)) # [] then (
+        asym_dbg("detect: order=1 via diff(y,x,1)", true), return(1)
+    ),
+
+    /* fallback */
+    asym_dbg("detect: fallback n", 1),
+    1
+)$
+
+
+/* ---------- Helper: structural max derivative order ----------
+   Returns the largest integer m s.t. a noun derivative 'diff(y(x),x,m) appears in expr.
+   Treats 'diff(y(x),x) as order 1. Coerces non-atomic orders (e.g. 1+1) to integers.
+*/
+asym_max_deriv_order(expr, dep_var_func, x) := block(
+    [mx : 0, a, m, i, nsub],
+    if atom(expr) then return(0),
+    if op(expr) = 'diff then (
+        a : args(expr),
+        if length(a) >= 2 and a[1] = dep_var_func and a[2] = x then (
+            m : if length(a) >= 3 then asym_int(a[3], 1) else 1,
+            if integerp(m) and m > mx then mx : m
+        )
+    ),
+    nsub : length(args(expr)),
+    for i : 1 thru nsub do
+        mx : max(mx, asym_max_deriv_order(args(expr)[i], dep_var_func, x)),
+    mx
+)$
+
+/* ---------- Helper: parse ICs for nth-order ----------
+   initial_conditions must contain exactly 'n' equations:
+     - y(x0) = a0   (required)
+     - 'diff(y(x),x,k) = ak   for k = 1..n-1  (values interpreted at x0)
+   Returns: [y0, lo_rules, ic_vals]
+     - y0        : value of y(x0)
+     - lo_rules  : rules for lower derivatives (1..n-1): 'diff(y(x),x,k) = ak
+     - ic_vals   : an assoc list mapping k -> ak for k=1..n-1 (for building series)
+*/
+asym_parse_ic_nth(initial_conditions, dep_var_func, x, x0, n) := block(
+    [y0 : false, lo_rules : [], ic_vals : [], i, eqi, L, R, k],
+    if not (listp(initial_conditions) and length(initial_conditions) = n) then
+        error("initial_conditions must be a list of exactly ~a equations", n),
+
+    /* find y(x0) = a0 */
+    for i : 1 thru length(initial_conditions) do (
+        eqi : initial_conditions[i],
+        if op(eqi) # "=" then error("initial_conditions entries must be equations"),
+        L : lhs(eqi), R : rhs(eqi),
+        if L = subst(x = x0, dep_var_func) then y0 : R
+    ),
+    if y0 = false then
+        error("initial_condition for y(x0) is missing"),
+
+    /* collect derivative ICs 1..n-1 */
+    for k : 1 thru n - 1 do (
+        /* Accept 'diff(y(x),x,k) = value' */
+        eqi : false,
+        for i : 1 thru length(initial_conditions) do (
+            L : lhs(initial_conditions[i]),
+            if L = 'diff(dep_var_func, x, k) then (eqi : initial_conditions[i], i : length(initial_conditions)) /* break inner */
+        ),
+        if eqi = false then
+            error("missing initial condition for y^(~a)(x0)", k),
+        lo_rules : cons('diff(dep_var_func, x, k) = rhs(eqi), lo_rules),
+        if k = 1 then lo_rules : cons('diff(dep_var_func, x    ) = rhs(eqi), lo_rules),
+        ic_vals : cons([k, rhs(eqi)], ic_vals)
+    ),
+
+    lo_rules : listify(setify(lo_rules)),   /* dedup but keep as LIST */
+    [y0, lo_rules, ic_vals]
+)$
+
+
+
+
 /* Optional convenience: string-returning wrapper */
 asymptotic_ode_solve_str(equation, dep_var_func, expansion_point, order, initial_condition) := block(
     [res],
@@ -226,6 +354,178 @@ asymptotic_ode_solve(equation, dep_var_func, expansion_point, order, initial_con
     asym_format_sum(solution)
 )$
 
+/* ========================================================================
+ *  Phase 2: nth-order explicit ODEs
+ *  y^(n) = H(x, y, y', ..., y^(n-1)), with n initial conditions.
+ *
+ *  API:
+ *    asymptotic_ode_solve_nth(equation, y(x), x=a, order, [y(a)=c0, 'diff(y(x),x,1)=c1, ..., 'diff(y(x),x,n-1)=c_{n-1}])
+ *
+ *  Notes:
+ *   - Reuses canonicalization + two-stage substitution:
+ *       Stage A: apply high-order rules (k>=n) to a fixed point
+ *       Stage B: apply lower-derivative rules (k<n) once
+ *   - Builds coefficients from y^(k)(x0)/k!; uses ICs for k < n, and H for k ≥ n
+ *   - Returns a copy-paste-friendly sum (expand only; never ratsimp the full series)
+ * ======================================================================== */
+asymptotic_ode_solve_nth(equation, dep_var_func, expansion_point, order, initial_conditions) := block(
+    /* locals */
+    [y, x, x0, y0, N, n, max_guess, solH, H, k,
+     hi_rules, lo_rules, expr_k, val_k, solution,
+     ic_data, ic_vals, tmp1, tmp2, kill_consts,
+     eqn_canonical, lhs_can, rhs_can],
+
+    /* ---------- 1) Input parsing & validation ---------- */
+    if atom(dep_var_func) then
+        error("dep_var(indep_var) must be a function call like y(x)"),
+
+    if length(args(dep_var_func)) # 1 then
+        error("dep_var(indep_var) must have exactly one argument"),
+
+    y : op(dep_var_func),
+    x : args(dep_var_func)[1],
+
+    if op(expansion_point) # "=" then
+        error("expansion_point must be an equation, e.g., x = 0"),
+
+    if lhs(expansion_point) # x then
+        error("expansion_point variable must match the independent variable"),
+
+    x0 : rhs(expansion_point),
+
+    if not (integerp(order) and order >= 0) then
+        error("order must be a non-negative integer"),
+    N : order,
+
+    /* Canonicalize the equation once for detection and solving */
+    max_guess : max(N + 8, 16),
+    block([eqn0],
+        eqn0    : if op(equation) = "=" then equation else (equation = 0),
+        lhs_can : asym_canonicalize_diffs(lhs(eqn0), dep_var_func, x, max_guess),
+        rhs_can : asym_canonicalize_diffs(rhs(eqn0), dep_var_func, x, max_guess),
+        eqn_canonical : lhs_can = rhs_can
+    ),
+    asym_dbg("nth: eqn canonical LHS", lhs_can),
+    asym_dbg("nth: eqn canonical RHS", rhs_can),
+
+    /* Detect highest order n on the canonical equation */
+    n : asym_detect_highest_order(eqn_canonical, dep_var_func, x, max_guess),
+    asym_dbg("nth: detected order n", n),
+
+    /* NEW: show the target derivative we will solve for */
+    asym_dbg("nth: target variable", if n=1 then 'diff(dep_var_func, x) else 'diff(dep_var_func, x, n)),
+
+    /* solve for y^(n) on the canonical equation (handle n = 1 vs n >= 2) */
+    if n = 1 then (
+        solH : solve(eqn_canonical, 'diff(dep_var_func, x)),
+        if solH = [] then (
+            /* try explicit order-1 form as fallback */
+            solH : solve(eqn_canonical, 'diff(dep_var_func, x, 1))
+        )
+    )
+    else (
+        solH : solve(eqn_canonical, 'diff(dep_var_func, x, n))
+    ),
+
+    if solH = [] then
+        error("Cannot solve the equation for the highest derivative diff(~a,~a,~a)", dep_var_func, x, n),
+
+    H : rhs(solH[1]),
+    asym_dbg("nth: H(x, y, ..., y^(n-1))", H),
+
+    /* parse ICs: y0 and lower-derivative values 1..n-1 (interpreted at x0) */
+    ic_data : asym_parse_ic_nth(initial_conditions, dep_var_func, x, x0, n),
+    y0      : ic_data[1],
+    lo_rules: ic_data[2],
+    ic_vals : ic_data[3],
+
+    asym_dbg("nth: y0", y0),
+    asym_dbg("nth: lo_rules", lo_rules),
+
+    /* ---------- 2) Build the series skeleton from ICs (k < n) ---------- */
+    solution : y0,
+    for k : 1 thru min(N, n - 1) do (
+        /* fetch ak from ic_vals */
+        block([ak],
+            ak : assoc(k, ic_vals),      /* returns the value or false */
+            if ak = false then
+                error("missing initial condition for y^(~a)(x0)", k),
+            solution : solution + (ak / factorial(k)) * (x - x0)^k
+        )
+    ),
+
+
+
+    /* if the requested order is below n, we are done */
+    if N < n then return( asym_format_sum(solution) ),
+
+    /* ---------- 3) Initialize rules and base expression for y^(n) ---------- */
+    hi_rules : [],  /* will hold values for y^(m)(x0) with m >= n, plus one-step nested */
+    /* expr_k will represent y^(n)(x) = H(x, y, ..., y^(n-1)) and its x-derivatives */
+
+    expr_k : H,
+
+    /* Evaluate y^(n)(x0) by substituting lower-derivative ICs, then y(x)=y0, then x=x0 */
+    tmp1  : subst(lo_rules, expr_k),
+    tmp2  : subst(dep_var_func = y0, tmp1),
+
+    /* Kill derivatives of constants that may have appeared: 'diff(y0, x, m) and 'diff(1, x, m) */
+    kill_consts : [],
+    for k : 1 thru n do (
+        kill_consts : cons(buildq([y0, x, k], 'diff(y0, x, k) = 0), kill_consts),
+        kill_consts : cons(buildq([x,  k],     'diff(1,  x, k) = 0), kill_consts)
+    ),
+    tmp2  : subst(kill_consts, tmp2),
+    val_k : ratsimp(subst(x = x0, tmp2)),
+
+    /* record y^(n)(x0) into high-order rules (canonical + one-step nested) */
+    hi_rules : cons('diff(dep_var_func, x, n) = val_k, hi_rules),
+    hi_rules : cons('diff('diff(dep_var_func, x, n - 1), x, 1) = val_k, hi_rules),
+
+    /* add k = n term to the series if within requested order */
+    if N >= n then (
+        solution : solution + (val_k / factorial(n)) * (x - x0)^n
+    ),
+
+    asym_dbg( sconcat("nth: y^(", n, ")(x0)"), val_k ),
+
+    /* ---------- 4) Iterate for k = n+1 .. N ---------- */
+    for k : n + 1 thru N do (
+        /* Differentiate previous expr w.r.t x to get y^(k) symbolic form */
+        expr_k : diff(expr_k, x),
+
+        /* Two-stage substitution: high-order (>=n) to fixed point, then low (1..n-1) once */
+        tmp1 : asym_apply_deriv_substs_two_stage(expr_k, dep_var_func, x, hi_rules, lo_rules, k + 2),
+
+        /* Substitute y(x) = y0 (but not x yet) */
+        tmp2 : subst(dep_var_func = y0, tmp1),
+
+        /* Kill derivatives of constants */
+        kill_consts : [],
+        for mmm : 1 thru k do (
+            kill_consts : cons(buildq([y0, x, mmm], 'diff(y0, x, mmm) = 0), kill_consts),
+            kill_consts : cons(buildq([x,  mmm],     'diff(1,  x, mmm) = 0), kill_consts)
+        ),
+        tmp2  : subst(kill_consts, tmp2),
+
+        /* Evaluate at x0 to get scalar y^(k)(x0) */
+        val_k : ratsimp(subst(x = x0, tmp2)),
+
+        /* Record this derivative into high-order rules (canonical + one-step nested) */
+        hi_rules : cons('diff(dep_var_func, x, k) = val_k, hi_rules),
+        hi_rules : cons('diff('diff(dep_var_func, x, k - 1), x, 1) = val_k, hi_rules),
+
+        /* Accumulate series term */
+        solution : solution + (val_k / factorial(k)) * (x - x0)^k,
+
+        asym_dbg(sconcat("nth: k=", k, " y^(", k, ")(x0)"), val_k)
+    ),
+
+    /* ---------- 5) Return formatted polynomial ---------- */
+    asym_format_sum(solution)
+)$
+
+
 /* -----------------------------------------------------------
    Example (spec §3.3):
 
@@ -275,6 +575,54 @@ asymptotic_ode_check(equation, dep_var_func, expansion_point, order, initial_con
   ),
   ok
 )$
+
+/* -------- Validator (nth order): residual vanishes through N - n --------
+   For an nth-order ODE y^(n) = H(x, y, ..., y^(n-1)), if y_series is truncated
+   at degree N, then r(x) = y_series^(n) - H(x, y_series, ..., y_series^(n-1))
+   satisfies r^(j)(x0) = 0 for j = 0..max(N - n, 0).
+*/
+asymptotic_ode_check_nth(equation, dep_var_func, expansion_point, order, initial_conditions) := block(
+  [x, x0, N, yser, max_guess, eqn0, lhs_can, rhs_can, eqn_canonical,
+   n, solH, H, subs, r, upto, j, val, ok:true],
+  /* parse */
+  x  : args(dep_var_func)[1],
+  x0 : rhs(expansion_point),
+  N  : order,
+
+  /* get the series using the nth-order solver */
+  yser : asymptotic_ode_solve_nth(equation, dep_var_func, expansion_point, order, initial_conditions),
+
+  /* canonicalize equation once (so detect/solve sees normalized diffs) */
+  max_guess : max(N + 8, 16),
+  eqn0      : if op(equation) = "=" then equation else (equation = 0),
+  lhs_can   : asym_canonicalize_diffs(lhs(eqn0), dep_var_func, x, max_guess),
+  rhs_can   : asym_canonicalize_diffs(rhs(eqn0), dep_var_func, x, max_guess),
+  eqn_canonical : lhs_can = rhs_can,
+
+  /* detect highest order n and isolate H */
+  n    : asym_detect_highest_order(eqn_canonical, dep_var_func, x, max_guess),
+  solH : if n = 1
+         then block([s], s : solve(eqn_canonical, 'diff(dep_var_func, x)),
+                        if s = [] then solve(eqn_canonical, 'diff(dep_var_func, x, 1)) else s)
+         else solve(eqn_canonical, 'diff(dep_var_func, x, n)),
+  if solH = [] then return(false),
+  H : rhs(solH[1]),
+
+  /* residual: y^(n) - H(x, y, y', ..., y^(n-1)) with y, y',... replaced by series */
+  subs : [dep_var_func = yser],
+  for j : 1 thru n - 1 do subs : cons('diff(dep_var_func, x, j) = diff(yser, x, j), subs),
+  r : diff(yser, x, n) - subst(subs, H),
+
+  /* check r^(j)(x0) = 0 for j = 0..max(N - n, 0) */
+  upto : max(N - n, 0),
+  for j : 0 thru upto do (
+    val : ratsimp( subst(x = x0, diff(r, x, j)) ),
+    if val # 0 then ( ok:false,
+      print(sconcat("Residual(n=", n, ") failure at j=", j, ": ", string(val))) )
+  ),
+  ok
+)$
+
 
 /* -------- Compact assertion helper -------- */
 asym_expect(expr, expect) := block([],
@@ -344,5 +692,38 @@ asym_mvp_test_suite() := block(
 
   print("--- Test suite result:", if ok then "ALL PASS ✅" else "FAILED ❌"),
   display2d : oldd2d,  /* restore */
+  ok
+)$
+
+/* -------- Phase 2 (nth-order) test suite -------- */
+asym_phase2_test_suite() := block(
+  [ok:true, tmp, x, oldd2d],
+  oldd2d : display2d,
+  display2d : false,
+  print("--- asymptotics.mac Phase 2 test suite ---"),
+
+  /* y'' = y, y(0)=1, y'(0)=0 -> cosh x */
+  tmp : asymptotic_ode_solve_nth('diff(y(x),x,2) = y(x), y(x), x=0, 6,
+         [y(0)=1, 'diff(y(x),x,1)=0]),
+  ok  : ok and asym_expect(tmp, 1 + x^2/2 + x^4/24 + x^6/720),
+  ok  : ok and asymptotic_ode_check_nth('diff(y(x),x,2) = y(x), y(x), x=0, 6,
+         [y(0)=1, 'diff(y(x),x,1)=0]),
+
+  /* y'' = -y, y(0)=1, y'(0)=0 -> cos x */
+  tmp : asymptotic_ode_solve_nth('diff(y(x),x,2) = -y(x), y(x), x=0, 6,
+         [y(0)=1, 'diff(y(x),x,1)=0]),
+  ok  : ok and asym_expect(tmp, 1 - x^2/2 + x^4/24 - x^6/720),
+  ok  : ok and asymptotic_ode_check_nth('diff(y(x),x,2) = -y(x), y(x), x=0, 6,
+         [y(0)=1, 'diff(y(x),x,1)=0]),
+
+  /* y''' = 0 with ICs -> quadratic polynomial */
+  tmp : asymptotic_ode_solve_nth('diff(y(x),x,3) = 0, y(x), x=0, 3,
+         [y(0)=1, 'diff(y(x),x,1)=2, 'diff(y(x),x,2)=3]),
+  ok  : ok and asym_expect(tmp, 1 + 2*x + (3/2)*x^2),
+  ok  : ok and asymptotic_ode_check_nth('diff(y(x),x,3) = 0, y(x), x=0, 3,
+         [y(0)=1, 'diff(y(x),x,1)=2, 'diff(y(x),x,2)=3]),
+
+  print("--- Phase 2 result:", if ok then "ALL PASS ✅" else "FAILED ❌"),
+  display2d : oldd2d,
   ok
 )$

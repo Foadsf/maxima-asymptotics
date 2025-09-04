@@ -56,3 +56,39 @@ Always substitute derivative values **before** replacing `y(x)` with `y0` and **
 
 ## 10) Portability
 Tested on Maxima 5.48.1 (SBCL 2.5.7, Windows). The canonicalization + two-stage approach is resilient across versions because it reduces reliance on internal diff shapes.
+
+
+## Phase 2 (nth-order) Additions
+
+### A) Robust highest-order detection
+
+**Problem:** Structural scans sometimes missed the true highest derivative, causing the solver to target `y'` instead of `y^(n)`.
+
+**Fix:** A 3-stage detector on a *canonicalized* equation:
+
+1. Structural walk (`asym_max_deriv_order`) on LHS/RHS,
+2. `freeof` scan for `'diff(y(x),x,k)` from high to low,
+3. `solve` probe for `'diff(y(x),x,k)`.
+   Whichever hits first picks `n`. We log `eqn canonical LHS/RHS`, the chosen stage, and the final `n`.
+
+### B) Canonicalize once, use everywhere
+
+We canonicalize the equation to normalize noun derivatives and numeric orders, then reuse that canonical form for both detection and the `solve` that extracts `H`. This avoids drift between detection and solve targets.
+
+### C) IC parsing: assoc returns the value
+
+In Maxima, `assoc(k, alist)` returns the value (or `false`), not a key–value pair. Use `ak : assoc(k, ic_vals)` directly. Also keep substitution rules as a **list** (`listify(setify(...))`) so `subst` receives the right type.
+
+### D) Residual order (nth-order)
+
+For a degree-`N` series of an `n`-th order ODE, the residual derivatives vanish at the expansion point through **`max(N - n, 0)`** (first-order is the special case `N - 1`). The new `asymptotic_ode_check_nth(...)` enforces this.
+
+### E) Debugging that scales
+
+We extended `asym_debug` traces with:
+
+* canonical LHS/RHS of the equation,
+* detector stage outcomes,
+* the exact derivative variable we solve for,
+* the evaluated `y^(k)(x0)` per step.
+  This made failures immediately localizable.
