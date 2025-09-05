@@ -1,15 +1,15 @@
 # Example 003 — Integration gives arcsin
 
 We compute the series for the IVP
-\[
+$$
 y'(x) = \frac{1}{\sqrt{1 - x^2}},\quad y(0)=0
-\]
-so that \(y(x) = \arcsin(x)\).
+$$
+so that $y(x) = \arcsin(x)$.
 
-About \(x=0\), to order 7:
-\[
+About $x=0$, to order 7:
+$$
 \arcsin(x) = x + \frac{x^3}{6} + \frac{3x^5}{40} + \frac{5x^7}{112} + \cdots
-\]
+$$
 
 ## How to run
 
