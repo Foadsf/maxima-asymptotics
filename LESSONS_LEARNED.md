@@ -288,6 +288,95 @@ Based on the current implementation, future phases should:
 - **Comprehensive commenting**: Explain both the mathematics and the implementation
 - **Error handling first**: Validate inputs before processing
 
+
+## Phase 3 (Systems) Lessons
+
+### 30. Canonicalize across *all* dependent functions
+
+When working with systems, always canonicalize noun derivatives for **every** dependent symbol before attempting to isolate first derivatives. This prevents mismatched forms like `'diff(f(x),x,1)` coexisting with `'diff('diff(f(x),x,1), x, 1)`. The two-stage substitution strategy from Phase 1 (high-order to fixed point, then low-order once) **must** be applied component-wise to be reliable. (Builds on §14 and §21.)&#x20;
+
+### 31. Isolate *all* first derivatives once, then recurse
+
+For systems $(\mathbf{y}'=\mathbf{H}(x,\mathbf{y}))$, first use `solve` to extract the full RHS vector $\mathbf{H}$ in one shot on the **canonicalized** equations, then do series coefficient recursion jointly. Re-solving per component per order is slower and can drift structurally. (Related to §10 “Solve function behavior”.)&#x20;
+
+### 32. Two-stage rules that actually converge (systems)
+
+The **Stage-A/Stage-B** rule application works for systems too:
+
+1. Stage-A (iterate): collapse nested derivatives and apply **high-order** rules to a fixed point with a small safety margin $mo=\max(N+8,16)$.
+2. Stage-B (single pass): canonicalize again, then apply **low-order** / first-derivative rules once.
+   Only after that, substitute values for $x=x_0$, function values $f_i(x_0)$, and kill derivatives of constants. (Extends §14 and §21.)&#x20;
+
+### 33. Residual order for systems
+
+For a degree-$N$ system series, each component residual and its derivatives must vanish at $x_0$ through **$N-1$** (just like the scalar first-order case in §19). Our `asymptotic_ode_system_check(...)` implements exactly that.&#x20;
+
+### 34. Input validation that saves you later
+
+The error “equations\_list and dep\_vars\_list must have the same length” is **expected** in negative tests; keep strict checks: equal list lengths, one IC per dependent function, single shared independent variable, non-negative `order`, ICs evaluated at the **same** expansion point, etc. (Expands §7–§8, §20.)&#x20;
+
+---
+
+## Cross-Verification & Assumption Drift
+
+### 35. Independent verifiers prevent “assumption rot”
+
+Using SymPy *and* Mathematica surfaced two important expectation bugs in our test suite:
+
+* **System $f'=f+g,\;g'=f+g$**: the $x^5$ coefficient is **$2/15$** (not $1/15$).
+* **“Integration gives arcsin”**: the test used $y'=\sqrt{1-x^2}$ but expected the **arcsin** series (whose derivative is $1/\sqrt{1-x^2}$).
+  Cross-checks caught both and kept our Maxima tests honest. (Supports the “Manual Verification” idea in §12 and expands the general testing story.)&#x20;
+
+### 36. Mathematica quirks in CLI mode
+
+`AsymptoticDSolveValue` sometimes fails for systems under `wolframscript` even when `DSolveValue` works. A robust fallback is a **manual coefficient recursion** for 2×2 systems (what we implemented in our WL harness). Prefer that path first for deterministic CLI runs. (New lesson.)
+
+### 37. Performance checks: don’t `length(string(...))`
+
+Maxima’s `length` expects a **list**, not a string. Use list/structure metrics instead:
+
+* `length(args(expand(res)))  /* term count */`
+* `hipow(res, x)              /* highest power */`
+  This avoids type errors in performance tests. (New lesson.)
+
+---
+
+## Examples & Repository Hygiene
+
+### 38. Triangulated examples increase trust
+
+Each example folder now includes a **Maxima** script, a **SymPy** script, and a **Mathematica** script that compute the *same* series. This “triangle” makes it much easier to diagnose discrepancies—if one corner disagrees, you know where to look. (New lesson.)
+
+### 39. Keep verifiers out of the root
+
+Move cross-check tools into `dev/verification/` (with a `legacy/` corner). The root should contain the library, the suite, and minimal run files. A tiny `run_all_verifiers.bat` makes it trivial to re-validate everything before commits. (New lesson.)
+
+---
+
+## Concrete Snippets to Add (for quick copy/paste)
+
+**Systems residual principle** (documentation reminder):
+
+```maxima
+/* For a degree-N system series, verify residuals r_i and r_i^(j)(x0) = 0
+   for all components i and all j = 0..(N-1). */
+```
+
+**Performance metric** (replace string-length checks):
+
+```maxima
+/* Prefer structure-based checks, not strings */
+length(args(expand(res))) > 10  /* number of terms */
+hipow(res, x) >= 15             /* highest power */
+```
+
+**Mathematica fallback hint** (comment in WL harness):
+
+```wl
+(* For systems, prefer manual series recursion under wolframscript to avoid
+   sporadic AsymptoticDSolveValue/DSolveValue failures in CLI. *)
+```
+
 ## Summary
 
 The key to successful Maxima library development is understanding the system's symbolic nature and working with it, not against it. The most critical lesson is **differentiate first, substitute later** - this single principle could have prevented the majority of debugging time spent on this project.
