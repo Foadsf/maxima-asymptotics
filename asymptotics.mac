@@ -218,7 +218,36 @@ asym_parse_ic_nth(initial_conditions, dep_var_func, x, x0, n) := block(
     [y0, lo_rules, ic_vals]
 )$
 
+/* ---------- Helper: multi-function two-stage substitution ----------
+   Applies canonicalization & derivative rules for a *system* of functions.
+   Stage A: apply hi_rules to a fixed point (with repeated canonicalization).
+   Stage B: canonicalize again, then apply lo_rules once.
+   - dep_vars_list: e.g., [f(x), g(x), ...]
+   - hi_rules/lo_rules: can contain rules for *all* functions.
+*/
+asym_apply_system_rules_two_stage(expr, dep_vars_list, x, hi_rules, lo_rules, max_order) := block(
+  [cur: expr, prev: false, i, mo],
+  mo : asym_int(max_order, 16),
 
+  /* ----- Stage A: fixed-point apply of high-order rules ----- */
+  for i : 1 thru 10 do (
+    prev : cur,
+    /* canonicalize w.r.t each function so rules match */
+    for dv in dep_vars_list do (
+      cur : asym_canonicalize_diffs(cur, dv, x, mo)
+    ),
+    cur : subst(hi_rules, cur),
+    if cur = prev then (i : 10) /* break */
+  ),
+
+  /* ----- Stage B: one pass of lower-order rules ----- */
+  for dv in dep_vars_list do (
+    cur : asym_canonicalize_diffs(cur, dv, x, mo)
+  ),
+  cur : subst(lo_rules, cur),
+
+  cur
+)$
 
 
 /* Optional convenience: string-returning wrapper */
@@ -525,6 +554,153 @@ asymptotic_ode_solve_nth(equation, dep_var_func, expansion_point, order, initial
     asym_format_sum(solution)
 )$
 
+/* ========================================================================
+ *  Phase 3: Systems of first-order explicit ODEs
+ *  Solve:  [f1'(x), ..., fm'(x)] = H(x, f1, ..., fm)
+ *  API:
+ *    asymptotic_system_solve(
+ *      equations_list,       /* ['diff(f(x),x)=..., 'diff(g(x),x)=..., ...] or expr=0 */
+ *      dep_vars_list,        /* [f(x), g(x), ...] */
+ *      expansion_point,      /* x = a */
+ *      order,                /* series degree N */
+ *      initial_conditions    /* [f(a)=..., g(a)=..., ...] */
+ *    )
+ *  Returns: list of polynomials [series_f, series_g, ...] in same order as dep_vars_list
+ * ======================================================================== */
+asymptotic_system_solve(equations_list, dep_vars_list, expansion_point, order, initial_conditions) := block(
+  [m, x, x0, N, i, j, eqs_can:[], der_vars:[], sol, H_list:[], y0_map:[], y0_subs:[],
+   lo_rules:[], hi_rules:[], solutions:[], exprs:[], vals, tmp, kill_consts, mo],
+
+  /* ----- 1) Validate inputs ----- */
+  if not listp(equations_list) then error("equations_list must be a list"),
+  if not listp(dep_vars_list) then error("dep_vars_list must be a list"),
+  if not listp(initial_conditions) then error("initial_conditions must be a list"),
+  m : length(dep_vars_list),
+  if length(equations_list) # m then error("equations_list and dep_vars_list must have the same length"),
+  if length(initial_conditions) # m then error("initial_conditions_list must have exactly one IC per dependent function"),
+
+  /* independent var and expansion point */
+  if m = 0 then return([]),
+  if length(args(first(dep_vars_list))) # 1 then error("each dependent variable must be a 1-arg function like f(x)"),
+  x  : args(first(dep_vars_list))[1],
+
+  if op(expansion_point) # "=" then error("expansion_point must be an equation like x = 0"),
+  if lhs(expansion_point) # x then error("expansion_point variable must match the independent variable"),
+  x0 : rhs(expansion_point),
+
+  if not (integerp(order) and order >= 0) then error("order must be a non-negative integer"),
+  N : order,
+  mo : max(N + 8, 16),
+
+  /* ensure all dep vars share same x */
+  for dv in dep_vars_list do (
+    if length(args(dv)) # 1 or args(dv)[1] # x then
+      error("all dependent variables must share the same independent variable")
+  ),
+
+  /* ----- 2) Canonicalize equations & isolate first derivatives simultaneously ----- */
+  /* canonicalize each equation and build vector derivative unknowns */
+  block([lhs_can, rhs_can, eqn0],
+    for i : 1 thru m do (
+      eqn0   : if op(equations_list[i]) = "=" then equations_list[i] else (equations_list[i] = 0),
+      lhs_can: equations_list[i],
+      rhs_can: 0,
+      lhs_can: asym_canonicalize_diffs(lhs(eqn0), dep_vars_list[i], x, mo), /* local pass per eq */
+      rhs_can: asym_canonicalize_diffs(rhs(eqn0), dep_vars_list[i], x, mo),
+      /* also sweep through other functions to normalize nested diffs across the board */
+      for dv in dep_vars_list do (
+        lhs_can : asym_canonicalize_diffs(lhs_can, dv, x, mo),
+        rhs_can : asym_canonicalize_diffs(rhs_can, dv, x, mo)
+      ),
+      eqs_can : endcons(lhs_can = rhs_can, eqs_can)
+    ),
+    /* derivative variables to solve for: 'diff(fi(x),x,1) */
+    for dv in dep_vars_list do der_vars : endcons('diff(dv, x, 1), der_vars)
+  ),
+
+  sol : solve(eqs_can, der_vars),
+  if sol = [] then error("Cannot solve the system for the first derivatives"),
+  if not listp(first(sol)) then error("Unexpected shape from solve() for system"),
+  /* Extract H_i keeping order of der_vars */
+  for i : 1 thru m do H_list : endcons(rhs(first(sol)[i]), H_list),
+
+  asym_dbg("sys: H list", H_list),
+
+  /* ----- 3) Parse ICs → y0 values & initial series terms ----- */
+  /* y0_map = [[f(x), f0], [g(x), g0], ...], and y0_subs = [f(x)=f0, g(x)=g0, ...] */
+  for dv in dep_vars_list do (
+    block([found:false, v0:false],
+      for ic in initial_conditions do (
+        if op(ic) # "=" then error("initial conditions must be equations"),
+        if lhs(ic) = subst(x = x0, dv) then (found:true, v0:rhs(ic))
+      ),
+      if not found then error("missing initial condition for ~a at x0", dv),
+      y0_map  : endcons([dv, v0], y0_map),
+      y0_subs : endcons(dv = v0, y0_subs)
+    )
+  ),
+
+  /* Initialize solution polynomials with a0 terms */
+  for i : 1 thru m do solutions : endcons(y0_map[i][2], solutions),
+
+  /* ----- 4) First derivative values (k=1) → lo_rules and linear terms ----- */
+  for i : 1 thru m do (
+    tmp : subst(y0_subs, H_list[i]),
+    tmp : ratsimp(subst(x = x0, tmp)),
+    /* add lo rules for both diff(dv,x) and diff(dv,x,1) */
+    lo_rules : endcons('diff(dep_vars_list[i], x    ) = tmp, lo_rules),
+    lo_rules : endcons('diff(dep_vars_list[i], x, 1) = tmp, lo_rules),
+    /* add linear term to polynomial */
+    solutions[i] : solutions[i] + tmp * (x - x0)
+  ),
+
+  asym_dbg("sys: lo_rules", lo_rules),
+
+  /* Base expressions for H (used to step derivatives) */
+  for i : 1 thru m do exprs : endcons(H_list[i], exprs),
+
+  if N = 0 then return(map(asym_format_sum, solutions)),
+  if N = 1 then return(map(asym_format_sum, solutions)),
+
+  /* ----- 5) Loop k = 2..N: differentiate, substitute rules, evaluate at x0, accumulate ----- */
+  for k : 2 thru N do (
+    /* step expressions to represent k-th derivatives symbolically */
+    for i : 1 thru m do (
+      exprs[i] : diff(exprs[i], x)
+    ),
+
+    /* evaluate each k-th derivative at x0 */
+    for i : 1 thru m do (
+      tmp : asym_apply_system_rules_two_stage(exprs[i], dep_vars_list, x, hi_rules, lo_rules, k + 2),
+      tmp : subst(y0_subs, tmp),
+
+      /* kill derivatives of constants y0 and 1 up to order k */
+      kill_consts : [],
+      for j : 1 thru k do (
+        for pair in y0_map do (
+          kill_consts : cons(buildq([c:pair[2], x, j], 'diff(c, x, j) = 0), kill_consts)
+        ),
+        kill_consts : cons(buildq([x, j], 'diff(1, x, j) = 0), kill_consts)
+      ),
+      tmp : subst(kill_consts, tmp),
+
+      tmp : ratsimp(subst(x = x0, tmp)),  /* scalar value for y_i^(k)(x0) */
+
+      /* record into hi_rules (canonical + one-step nested) for next orders */
+      hi_rules : endcons('diff(dep_vars_list[i], x, k) = tmp, hi_rules),
+      hi_rules : endcons('diff('diff(dep_vars_list[i], x, k - 1), x, 1) = tmp, hi_rules),
+
+      /* accumulate series term */
+      solutions[i] : solutions[i] + (tmp / factorial(k)) * (x - x0)^k,
+
+      asym_dbg(sconcat("sys: k=", k, " ", string(dep_vars_list[i]), "^(k)(x0)"), tmp)
+    )
+  ),
+
+  /* ----- 6) Return formatted list of polynomials ----- */
+  map(asym_format_sum, solutions)
+)$
+
 
 /* -----------------------------------------------------------
    Example (spec §3.3):
@@ -619,6 +795,62 @@ asymptotic_ode_check_nth(equation, dep_var_func, expansion_point, order, initial
     val : ratsimp( subst(x = x0, diff(r, x, j)) ),
     if val # 0 then ( ok:false,
       print(sconcat("Residual(n=", n, ") failure at j=", j, ": ", string(val))) )
+  ),
+  ok
+)$
+
+/* -------- Validator (system, first-order): residual vanishes through N-1 --------
+   For system f' = H(x, f), with series degree N:
+   r_i(x) = d/dx series_i - H_i(x, series_vector)
+   must satisfy r_i^(j)(x0) = 0 for j = 0..max(N-1, 0).
+*/
+asymptotic_ode_system_check(equations_list, dep_vars_list, expansion_point, order, initial_conditions) := block(
+  [x, x0, N, m, series, mo, eqs_can:[], der_vars:[], sol, H_list:[],
+   i, j, r_i, upto, ok:true, lhs_can, rhs_can, eqn0, dr, val],
+
+  if length(dep_vars_list) = 0 then return(true),
+  x  : args(first(dep_vars_list))[1],
+  x0 : rhs(expansion_point),
+  N  : order,
+  m  : length(dep_vars_list),
+  mo : max(N + 8, 16),
+
+  /* NOTE: use the systems solver (not a string wrapper) */
+  series : asymptotic_system_solve(equations_list, dep_vars_list, expansion_point, order, initial_conditions),
+
+  /* canonicalize and isolate H_i */
+  for i : 1 thru m do (
+    eqn0   : if op(equations_list[i]) = "=" then equations_list[i] else (equations_list[i] = 0),
+    lhs_can: asym_canonicalize_diffs(lhs(eqn0), dep_vars_list[i], x, mo),
+    rhs_can: asym_canonicalize_diffs(rhs(eqn0), dep_vars_list[i], x, mo),
+    for dv in dep_vars_list do (
+      lhs_can : asym_canonicalize_diffs(lhs_can, dv, x, mo),
+      rhs_can : asym_canonicalize_diffs(rhs_can, dv, x, mo)
+    ),
+    eqs_can : endcons(lhs_can = rhs_can, eqs_can)
+  ),
+  for dv in dep_vars_list do der_vars : endcons('diff(dv, x, 1), der_vars),
+
+  sol : solve(eqs_can, der_vars),
+  if sol = [] then return(false),
+  for i : 1 thru m do H_list : endcons(rhs(first(sol)[i]), H_list),
+
+  /* residual for each component */
+  upto : max(N - 1, 0),
+  for i : 1 thru m do (
+    r_i : diff(series[i], x) - subst(
+             makelist(dep_vars_list[j] = series[j], j, 1, m),
+             H_list[i]
+           ),
+    for j : 0 thru upto do (
+      /* DIFFERENTIATE FIRST, THEN EVALUATE AT x0 — avoid substituting in the diff's variable slot */
+      dr  : diff(r_i, x, j),
+      val : ratsimp( at(dr, x = x0) ),
+      if val # 0 then (
+        ok:false,
+        print(sconcat("System residual failure: component ", i, ", order j=", j, ": ", string(val)))
+      )
+    )
   ),
   ok
 )$

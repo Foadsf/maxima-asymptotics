@@ -1,0 +1,17 @@
+/* Example 001: f' = g, g' = -f; f(0)=0, g(0)=1; series about x=0 to order 7 */
+
+display2d:false$
+load("../../asymptotics.mac")$
+
+res : asymptotic_system_solve(
+        ['diff(f(x),x) = g(x), 'diff(g(x),x) = -f(x)],
+        [f(x), g(x)], x=0, 7, [f(0)=0, g(0)=1])$
+
+print("Maxima series f (order 7):", string(first(res)))$
+print("Maxima series g (order 7):", string(second(res)))$
+
+/* Optional: check each equation’s residual up to order-1 */
+ok : asymptotic_ode_system_check(
+       ['diff(f(x),x) = g(x), 'diff(g(x),x) = -f(x)],
+       [f(x), g(x)], x=0, 7, [f(0)=0, g(0)=1])$
+print("Residual check (system):", ok)$

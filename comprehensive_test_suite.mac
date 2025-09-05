@@ -1,0 +1,661 @@
+/* ========================================================================
+ *  comprehensive_test_suite.mac
+ *  Extensive test suite for the Maxima Asymptotics Library
+ *
+ *  Usage:
+ *    load("asymptotics.mac")$
+ *    load("comprehensive_test_suite.mac")$
+ *    run_comprehensive_tests()$
+ *
+ *  Tests are organized by category with expected outcomes
+ * ======================================================================== */
+
+/* Helper for floating point comparison with tolerance */
+asym_float_equal(a, b, tol) := abs(float(a) - float(b)) < tol$
+
+/* Enhanced expectation helper with better error reporting */
+asym_expect_enhanced(label, expr, expect, tolerance) := block([diff, result],
+    if tolerance = false then (
+        /* Exact symbolic comparison */
+        diff : ratsimp(expr - expect),
+        result : (diff = 0),
+        if not result then (
+            print(sconcat("FAIL: ", label)),
+            print(sconcat("  Got:      ", string(expr))),
+            print(sconcat("  Expected: ", string(expect))),
+            print(sconcat("  Diff:     ", string(diff)))
+        )
+    ) else (
+        /* Floating point comparison */
+        result : asym_float_equal(expr, expect, tolerance),
+        if not result then (
+            print(sconcat("FAIL: ", label)),
+            print(sconcat("  Got:      ", float(expr))),
+            print(sconcat("  Expected: ", float(expect))),
+            print(sconcat("  Diff:     ", float(expr - expect)))
+        )
+    ),
+    result
+)$
+
+/* Wrapper for exact comparison */
+asym_expect_exact(label, expr, expect) := asym_expect_enhanced(label, expr, expect, false)$
+
+/* Wrapper for floating point comparison */
+asym_expect_float(label, expr, expect, tol) := asym_expect_enhanced(label, expr, expect, tol)$
+
+/* Safe test runner that catches errors and continues */
+safe_test(test_func) := block([result],
+    result : errcatch(test_func()),
+    if result = [] then (
+        print("ERROR: Test function failed with an exception"),
+        false
+    ) else first(result)
+)$
+
+/* ========================================================================
+ *  PHASE 1: First-Order ODE Tests
+ * ======================================================================== */
+
+test_phase1_basic() := block([ok:true, res, x],
+    print("=== Phase 1: Basic First-Order ODEs ==="),
+
+    /* 1. Linear homogeneous: y' = y, y(0) = 1 → e^x */
+    res : asymptotic_ode_solve('diff(y(x),x) = y(x), y(x), x=0, 6, [y(0)=1]),
+    ok : ok and asym_expect_exact("Linear homogeneous y'=y", res,
+        1 + x + x^2/2 + x^3/6 + x^4/24 + x^5/120 + x^6/720),
+    ok : ok and asymptotic_ode_check('diff(y(x),x) = y(x), y(x), x=0, 6, [y(0)=1]),
+
+    /* 2. Linear with constant: y' = 2y, y(0) = 3 → 3e^(2x) */
+    res : asymptotic_ode_solve('diff(y(x),x) = 2*y(x), y(x), x=0, 4, [y(0)=3]),
+    ok : ok and asym_expect_exact("Linear y'=2y", res,
+        3 + 6*x + 6*x^2 + 4*x^3 + 2*x^4),
+
+    /* 3. Pure polynomial source: y' = x^2, y(0) = 0 → x^3/3 */
+    res : asymptotic_ode_solve('diff(y(x),x) = x^2, y(x), x=0, 5, [y(0)=0]),
+    ok : ok and asym_expect_exact("Polynomial source y'=x^2", res, x^3/3),
+
+    /* 4. Mixed polynomial: y' = x + x^2, y(0) = 1 */
+    res : asymptotic_ode_solve('diff(y(x),x) = x + x^2, y(x), x=0, 4, [y(0)=1]),
+    ok : ok and asym_expect_exact("Mixed polynomial y'=x+x^2", res,
+        1 + x^2/2 + x^3/3),
+
+    /* 5. Separable: y' = y^2, y(0) = 1 → 1/(1-x) = 1+x+x^2+... */
+    res : asymptotic_ode_solve('diff(y(x),x) = y(x)^2, y(x), x=0, 5, [y(0)=1]),
+    ok : ok and asym_expect_exact("Separable y'=y^2", res,
+        1 + x + x^2 + x^3 + x^4 + x^5),
+
+    print("Phase 1 Basic:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+test_phase1_nonlinear() := block([ok:true, res, x],
+    print("=== Phase 1: Nonlinear First-Order ODEs ==="),
+
+    /* 1. Spec example: y' = x + y^2, y(0) = 1 - cannot verify with SymPy, trust library */
+    res : asymptotic_ode_solve('diff(y(x),x) = x + y(x)^2, y(x), x=0, 3, [y(0)=1]),
+    ok : ok and asymptotic_ode_check('diff(y(x),x) = x + y(x)^2, y(x), x=0, 3, [y(0)=1]),
+
+    /* 2. y' = x*y, y(0) = 1 → e^(x^2/2) */
+    res : asymptotic_ode_solve('diff(y(x),x) = x*y(x), y(x), x=0, 6, [y(0)=1]),
+    ok : ok and asym_expect_exact("Bernoulli y'=xy", res,
+        1 + x^2/2 + x^4/8 + x^6/48),
+
+    /* 3. y' = y + sin(x), y(0) = 0 → (1/2)[e^x - sin(x) - cos(x)] = x^2/2 + x^3/6 + ... */
+    res : asymptotic_ode_solve('diff(y(x),x) = y(x) + sin(x), y(x), x=0, 5, [y(0)=0]),
+    ok : ok and asym_expect_exact("Linear inhomo y'=y+sin(x)", res,
+        x^2/2 + x^3/6),
+
+    /* 4. Riccati: y' = 1 + y^2, y(0) = 0 → tan(x) */
+    res : asymptotic_ode_solve('diff(y(x),x) = 1 + y(x)^2, y(x), x=0, 5, [y(0)=0]),
+    ok : ok and asym_expect_exact("Riccati y'=1+y^2", res,
+        x + x^3/3 + 2*x^5/15),
+
+    /* 5. y' = x^2 + y^2, y(0) = 0 - cannot verify with SymPy, trust library */
+    res : asymptotic_ode_solve('diff(y(x),x) = x^2 + y(x)^2, y(x), x=0, 5, [y(0)=0]),
+    ok : ok and asymptotic_ode_check('diff(y(x),x) = x^2 + y(x)^2, y(x), x=0, 5, [y(0)=0]),
+
+    print("Phase 1 Nonlinear:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+test_phase1_nonzero_points() := block([ok:true, res, x],
+    print("=== Phase 1: Non-zero Expansion Points ==="),
+
+    /* 1. y' = x^2, y(1) = 2 around x=1 */
+    res : asymptotic_ode_solve('diff(y(x),x) = x^2, y(x), x=1, 4, [y(1)=2]),
+    ok : ok and asym_expect_exact("Nonzero point y'=x^2 at x=1", res,
+        2 + (x-1) + (x-1)^2 + (1/3)*(x-1)^3),
+
+    /* 2. y' = y, y(2) = 1 around x=2 → e^(x-2) */
+    res : asymptotic_ode_solve('diff(y(x),x) = y(x), y(x), x=2, 4, [y(2)=1]),
+    ok : ok and asym_expect_exact("Exponential at x=2", res,
+        1 + (x-2) + (x-2)^2/2 + (x-2)^3/6 + (x-2)^4/24),
+
+    /* 3. y' = 2x, y(-1) = 0 around x=-1 */
+    res : asymptotic_ode_solve('diff(y(x),x) = 2*x, y(x), x=(-1), 3, [y(-1)=0]),
+    ok : ok and asym_expect_exact("Linear at x=-1", res,
+        -2*(x-(-1)) + (x-(-1))^2),
+
+    print("Phase 1 Nonzero Points:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+test_phase1_edge_cases() := block([ok:true, res, x],
+    print("=== Phase 1: Edge Cases ==="),
+
+    /* 1. Order 0 (just the initial condition) */
+    res : asymptotic_ode_solve('diff(y(x),x) = x + y(x)^2, y(x), x=0, 0, [y(0)=5]),
+    ok : ok and asym_expect_exact("Order 0", res, 5),
+
+    /* 2. Order 1 */
+    res : asymptotic_ode_solve('diff(y(x),x) = 3*x, y(x), x=0, 1, [y(0)=2]),
+    ok : ok and asym_expect_exact("Order 1", res, 2),
+
+    /* 3. Constant RHS: y' = 5, y(0) = 1 → 1 + 5x */
+    res : asymptotic_ode_solve('diff(y(x),x) = 5, y(x), x=0, 3, [y(0)=1]),
+    ok : ok and asym_expect_exact("Constant RHS", res, 1 + 5*x),
+
+    /* 4. Complex coefficients */
+    res : asymptotic_ode_solve('diff(y(x),x) = %i*y(x), y(x), x=0, 3, [y(0)=1]),
+    ok : ok and asym_expect_exact("Complex coefficient", res,
+        1 + %i*x + (%i^2/2)*x^2 + (%i^3/6)*x^3),
+
+    print("Phase 1 Edge Cases:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+/* ========================================================================
+ *  PHASE 2: nth-Order ODE Tests
+ * ======================================================================== */
+
+test_phase2_second_order() := block([ok:true, res, x],
+    print("=== Phase 2: Second-Order ODEs ==="),
+
+    /* 1. y'' = y, y(0)=1, y'(0)=0 → cosh(x) */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,2) = y(x), y(x), x=0, 6,
+        [y(0)=1, 'diff(y(x),x,1)=0]),
+    ok : ok and asym_expect_exact("Hyperbolic cosine", res,
+        1 + x^2/2 + x^4/24 + x^6/720),
+    ok : ok and asymptotic_ode_check_nth('diff(y(x),x,2) = y(x), y(x), x=0, 6,
+        [y(0)=1, 'diff(y(x),x,1)=0]),
+
+    /* 2. y'' = -y, y(0)=1, y'(0)=0 → cos(x) */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,2) = -y(x), y(x), x=0, 6,
+        [y(0)=1, 'diff(y(x),x,1)=0]),
+    ok : ok and asym_expect_exact("Trigonometric cosine", res,
+        1 - x^2/2 + x^4/24 - x^6/720),
+
+    /* 3. y'' = -y, y(0)=0, y'(0)=1 → sin(x) */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,2) = -y(x), y(x), x=0, 5,
+        [y(0)=0, 'diff(y(x),x,1)=1]),
+    ok : ok and asym_expect_exact("Trigonometric sine", res,
+        x - x^3/6 + x^5/120),
+
+    /* 4. Simple harmonic with frequency: y'' = -4y, y(0)=1, y'(0)=0 */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,2) = -4*y(x), y(x), x=0, 4,
+        [y(0)=1, 'diff(y(x),x,1)=0]),
+    ok : ok and asym_expect_exact("SHO frequency 2", res,
+        1 - 2*x^2 + 2*x^4/3),
+
+    /* 5. Damped oscillator: y'' + 2y' + y = 0, y(0)=1, y'(0)=0 */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,2) + 2*'diff(y(x),x,1) + y(x) = 0, y(x), x=0, 4,
+        [y(0)=1, 'diff(y(x),x,1)=0]),
+    ok : ok and asymptotic_ode_check_nth('diff(y(x),x,2) + 2*'diff(y(x),x,1) + y(x) = 0, y(x), x=0, 4,
+        [y(0)=1, 'diff(y(x),x,1)=0]),
+
+    print("Phase 2 Second-Order:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+test_phase2_higher_order() := block([ok:true, res, x],
+    print("=== Phase 2: Higher-Order ODEs ==="),
+
+    /* 1. Third order: y''' = 0, polynomial ICs */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,3) = 0, y(x), x=0, 3,
+        [y(0)=1, 'diff(y(x),x,1)=2, 'diff(y(x),x,2)=3]),
+    ok : ok and asym_expect_exact("Third order polynomial", res,
+        1 + 2*x + (3/2)*x^2),
+
+    /* 2. Fourth order: y^(4) = y, y(0)=1, y'(0)=0, y''(0)=0, y'''(0)=0 */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,4) = y(x), y(x), x=0, 8,
+        [y(0)=1, 'diff(y(x),x,1)=0, 'diff(y(x),x,2)=0, 'diff(y(x),x,3)=0]),
+    ok : ok and asym_expect_exact("Fourth order y^(4)=y", res,
+        1 + x^4/24 + x^8/40320),
+
+    /* 3. Third order with coupling: y''' = x + y, constant ICs */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,3) = x + y(x), y(x), x=0, 5,
+        [y(0)=1, 'diff(y(x),x,1)=0, 'diff(y(x),x,2)=0]),
+    ok : ok and asym_expect_exact("Third order coupling", res,
+        1 + x^3/6 + x^4/24),
+
+    print("Phase 2 Higher-Order:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+test_phase2_nonzero_expansion() := block([ok:true, res, x],
+    print("=== Phase 2: nth-Order at Non-zero Points ==="),
+
+    /* 1. y'' = y around x=1, y(1)=1, y'(1)=1 → e^(x-1) */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,2) = y(x), y(x), x=1, 4,
+        [y(1)=1, 'diff(y(x),x,1)=1]),
+    ok : ok and asym_expect_exact("Second order at x=1", res,
+        1 + (x-1) + (x-1)^2/2 + (x-1)^3/6 + (x-1)^4/24),
+
+    /* 2. y''' = 6 around x=2, should give cubic (x-2)^3 + const terms */
+    res : asymptotic_ode_solve_nth('diff(y(x),x,3) = 6, y(x), x=2, 4,
+        [y(2)=0, 'diff(y(x),x,1)=0, 'diff(y(x),x,2)=0]),
+    ok : ok and asym_expect_exact("Constant third derivative", res,
+        (x-2)^3),
+
+    print("Phase 2 Nonzero Expansion:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+/* ========================================================================
+ *  PHASE 3: Systems of First-Order ODEs
+ * ======================================================================== */
+test_phase3_systems() := block([ok:true, res, sys, x],
+  print("=== Phase 3: Systems of First-Order ODEs ==="),
+
+  /* 1) f' = g, g' = -f with f(0)=0, g(0)=1 -> [sin, cos] */
+  res : asymptotic_system_solve(
+          ['diff(f(x),x) = g(x), 'diff(g(x),x) = -f(x)],
+          [f(x), g(x)],
+          x=0, 5,
+          [f(0)=0, g(0)=1]
+        ),
+  ok : ok and asym_expect_exact("Simple oscillator f/g",
+        first(res),  x - x^3/6 + x^5/120),
+  ok : ok and asym_expect_exact("Simple oscillator g",
+        second(res), 1 - x^2/2 + x^4/24),
+  ok : ok and asymptotic_ode_system_check(
+        ['diff(f(x),x) = g(x), 'diff(g(x),x) = -f(x)],
+        [f(x), g(x)], x=0, 5, [f(0)=0, g(0)=1]),
+
+  /* 2) f' = f+g, g' = f+g; f(0)=1, g(0)=0 -> f=(1+e^{2x})/2, g=(e^{2x}-1)/2 */
+  res : asymptotic_system_solve(
+          ['diff(f(x),x) = f(x) + g(x), 'diff(g(x),x) = f(x) + g(x)],
+          [f(x), g(x)],
+          x=0, 5,
+          [f(0)=1, g(0)=0]
+        ),
+  ok : ok and asym_expect_exact("Exp system f",
+        first(res), 1 + x + x^2 + (2/3)*x^3 + (1/3)*x^4 + (2/15)*x^5),
+  ok : ok and asym_expect_exact("Exp system g",
+        second(res), x + x^2 + (2/3)*x^3 + (1/3)*x^4 + (2/15)*x^5),
+  ok : ok and asymptotic_ode_system_check(
+        ['diff(f(x),x) = f(x) + g(x), 'diff(g(x),x) = f(x) + g(x)],
+        [f(x), g(x)], x=0, 5, [f(0)=1, g(0)=0]),
+
+  /* 3) Mixed polynomial: f'=x, g'=f+g; f(0)=0, g(0)=1 (exact series to 4) */
+  res : asymptotic_system_solve(
+          ['diff(f(x),x) = x, 'diff(g(x),x) = f(x) + g(x)],
+          [f(x), g(x)],
+          x=0, 4,
+          [f(0)=0, g(0)=1]
+        ),
+  ok : ok and asym_expect_exact("Mixed poly f", first(res), x^2/2),
+  ok : ok and asym_expect_exact("Mixed poly g", second(res),
+        1 + x + x^2/2 + x^3/3 + x^4/12),
+  ok : ok and asymptotic_ode_system_check(
+        ['diff(f(x),x) = x, 'diff(g(x),x) = f(x) + g(x)],
+        [f(x), g(x)], x=0, 4, [f(0)=0, g(0)=1]),
+
+  /* 4) Nonlinear: f'=f*g, g'=-f; f(0)=0, g(0)=1 -> exact solution f=0, g=1 */
+  res : asymptotic_system_solve(
+          ['diff(f(x),x) = f(x)*g(x), 'diff(g(x),x) = -f(x)],
+          [f(x), g(x)],
+          x=0, 6,
+          [f(0)=0, g(0)=1]
+        ),
+  ok : ok and asym_expect_exact("Nonlinear exact f", first(res), 0),
+  ok : ok and asym_expect_exact("Nonlinear exact g", second(res), 1),
+  ok : ok and asymptotic_ode_system_check(
+        ['diff(f(x),x) = f(x)*g(x), 'diff(g(x),x) = -f(x)],
+        [f(x), g(x)], x=0, 6, [f(0)=0, g(0)=1]),
+
+  /* 5) Error handling: mismatched list sizes */
+  block([caught:false],
+    caught : (errcatch(
+      asymptotic_system_solve(
+        ['diff(f(x),x) = g(x)], [f(x), g(x)], x=0, 3, [f(0)=0, g(0)=1]
+      )) = []),
+    ok : ok and caught
+  ),
+
+  print("Phase 3 Systems:", if ok then "PASS" else "FAIL"),
+  ok
+)$
+
+
+/* ========================================================================
+ *  SPECIAL FUNCTION TESTS
+ * ======================================================================== */
+
+test_special_functions() := block([ok:true, res, x, tol:1e-6],
+    print("=== Special Functions (Numerical Validation) ==="),
+
+    /* 1. y' = cos(x), y(0) = 0 → sin(x) */
+    res : asymptotic_ode_solve('diff(y(x),x) = cos(x), y(x), x=0, 7, [y(0)=0]),
+    ok : ok and asym_expect_exact("Integration of cosine", res,
+        x - x^3/6 + x^5/120 - x^7/5040),
+
+    /* 2. y' = exp(x), y(0) = 1 → e^x  -- Use reasonable tolerance for truncation error */
+    res : asymptotic_ode_solve('diff(y(x),x) = exp(x), y(x), x=0, 5, [y(0)=1]),
+    /* Validate numerically at x=0.1 with reasonable tolerance for 5th order truncation */
+    ok : ok and asym_expect_float("Integration of exponential at x=0.1",
+        subst(x=0.1, res), exp(0.1), tol),
+
+    /* 3. y' = 1/(1+x^2), y(0) = 0 → arctan(x) */
+    res : asymptotic_ode_solve('diff(y(x),x) = 1/(1+x^2), y(x), x=0, 9, [y(0)=0]),
+    ok : ok and asym_expect_exact("Integration gives arctan", res,
+        x - x^3/3 + x^5/5 - x^7/7 + x^9/9),
+
+    /* 4. y' = sqrt(1-x^2), y(0) = 0 → arcsin(x) [first few terms] */
+    res : asymptotic_ode_solve('diff(y(x),x) = 1/sqrt(1 - x^2), y(x), x=0, 5, [y(0)=0]),
+    ok  : ok and asym_expect_exact("Integration gives arcsin", res,
+        x + x^3/6 + (3/40)*x^5),
+
+    res : asymptotic_ode_solve('diff(y(x),x) = sqrt(1 - x^2), y(x), x=0, 5, [y(0)=0]),
+    ok  : ok and asym_expect_exact("Integration of sqrt(1 - x^2)", res,
+        x - x^3/6 - x^5/40),
+
+    print("Special Functions:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+/* ========================================================================
+ *  ERROR HANDLING TESTS
+ * ======================================================================== */
+
+test_error_handling() := block([ok:true, caught],
+    print("=== Error Handling Tests ==="),
+
+    /* 1. Mismatched initial condition point */
+    caught : (errcatch(asymptotic_ode_solve('diff(y(x),x) = x, y(x), x=0, 2, [y(1)=0])) = []),
+    ok : ok and caught,
+    if caught then print("  Caught mismatched IC point") else print("  Failed to catch mismatched IC point"),
+
+    /* 2. Unsolvable equation (no derivative) */
+    caught : (errcatch(asymptotic_ode_solve(y(x) = x^2, y(x), x=0, 2, [y(0)=0])) = []),
+    ok : ok and caught,
+    if caught then print("  Caught unsolvable equation") else print("  Failed to catch unsolvable equation"),
+
+    /* 3. Negative order */
+    caught : (errcatch(asymptotic_ode_solve('diff(y(x),x) = x, y(x), x=0, -1, [y(0)=0])) = []),
+    ok : ok and caught,
+    if caught then print("  Caught negative order") else print("  Failed to catch negative order"),
+
+    /* 4. Wrong number of ICs for nth-order */
+    caught : (errcatch(asymptotic_ode_solve_nth('diff(y(x),x,2) = y(x), y(x), x=0, 3, [y(0)=1])) = []),
+    ok : ok and caught,
+    if caught then print("  Caught insufficient ICs") else print("  Failed to catch insufficient ICs"),
+
+    /* 5. Non-function dependent variable */
+    caught : (errcatch(asymptotic_ode_solve('diff(y,x) = x, y, x=0, 2, [y=0])) = []),
+    ok : ok and caught,
+    if caught then print("  Caught non-function syntax") else print("  Failed to catch non-function syntax"),
+
+    print("Error Handling:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+/* ========================================================================
+ *  PERFORMANCE AND STRESS TESTS
+ * ======================================================================== */
+
+test_performance() := block([ok:true, res, x, start_time, end_time],
+    print("=== Performance Tests ==="),
+
+    /* 1. High order expansion */
+    start_time : elapsed_real_time(),
+    res : asymptotic_ode_solve('diff(y(x),x) = y(x), y(x), x=0, 15, [y(0)=1]),
+    end_time : elapsed_real_time(),
+    ok : ok and (hipow(res, x) >= 15),  /* Should be a long polynomial */
+    print(sconcat("High order (15): ", end_time - start_time, " seconds")),
+
+    /* 2. Complex nonlinear ODE */
+    start_time : elapsed_real_time(),
+    res : asymptotic_ode_solve('diff(y(x),x) = x^3*y(x)^2 + sin(x)*cos(x), y(x), x=0, 8, [y(0)=1]),
+    end_time : elapsed_real_time(),
+    ok : ok and asymptotic_ode_check('diff(y(x),x) = x^3*y(x)^2 + sin(x)*cos(x), y(x), x=0, 8, [y(0)=1]),
+    print(sconcat("Complex nonlinear: ", end_time - start_time, " seconds")),
+
+    /* 3. High order nth-order ODE */
+    start_time : elapsed_real_time(),
+    res : asymptotic_ode_solve_nth('diff(y(x),x,3) = y(x) + x, y(x), x=0, 10,
+        [y(0)=1, 'diff(y(x),x,1)=0, 'diff(y(x),x,2)=0]),
+    end_time : elapsed_real_time(),
+    ok : ok and asymptotic_ode_check_nth('diff(y(x),x,3) = y(x) + x, y(x), x=0, 10,
+        [y(0)=1, 'diff(y(x),x,1)=0, 'diff(y(x),x,2)=0]),
+    print(sconcat("High order 3rd-order ODE: ", end_time - start_time, " seconds")),
+
+    print("Performance:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+/* ========================================================================
+ *  MATHEMATICAL PROPERTY TESTS
+ * ======================================================================== */
+
+test_mathematical_properties() := block([ok:true, res1, res2, res3, x],
+    print("=== Mathematical Properties ==="),
+
+    /* 1. Linearity: y' = ay + bx should satisfy superposition for ICs */
+    res1 : asymptotic_ode_solve('diff(y(x),x) = 2*y(x) + 3*x, y(x), x=0, 4, [y(0)=1]),
+    res2 : asymptotic_ode_solve('diff(y(x),x) = 2*y(x) + 3*x, y(x), x=0, 4, [y(0)=0]),
+    res3 : asymptotic_ode_solve('diff(y(x),x) = 2*y(x) + 3*x, y(x), x=0, 4, [y(0)=2]),
+    /* res3 should equal 2*res1 for the homogeneous part */
+    ok : ok and (ratsimp((res3 - 2*res1 + res2)) = 0),
+    if ok then print("  Linear superposition verified") else print("  Linear superposition failed"),
+
+    /* 2. Scaling: if y(x) solves y' = f(x,y), then c*y(x/c) should relate predictably for homogeneous f */
+    /* For y' = y, y(0) = 1, scaling by 2: Y = 2y, T = x/2 gives Y' = Y in the T variable */
+    res1 : asymptotic_ode_solve('diff(y(x),x) = y(x), y(x), x=0, 4, [y(0)=1]),
+    res2 : asymptotic_ode_solve('diff(y(x),x) = y(x), y(x), x=0, 4, [y(0)=2]),
+    ok : ok and (ratsimp(res2 - 2*res1) = 0),
+    if ok then print("  Homogeneous scaling verified") else print("  Homogeneous scaling failed"),
+
+    /* 3. Time translation: y(x-a) solutions */
+    res1 : asymptotic_ode_solve('diff(y(x),x) = x, y(x), x=0, 3, [y(0)=0]),
+    res2 : asymptotic_ode_solve('diff(y(x),x) = x, y(x), x=1, 3, [y(1)=1/2]),
+    /* At x=2: res1 should give 2, res2 should give 1/2 + (2-1) + (2-1)^2/2 = 2 */
+    ok : ok and asym_expect_float("Time translation consistency",
+        subst(x=2, res1), subst(x=2, res2), 1e-10),
+
+    print("Mathematical Properties:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+/* ========================================================================
+ *  COMPARATIVE TESTS (Different Methods)
+ * ======================================================================== */
+
+test_comparative_methods() := block([ok:true, res1, res2, x],
+    print("=== Comparative Method Tests ==="),
+
+    /* 1. Compare 1st-order and nth-order solvers on same problem */
+    res1 : asymptotic_ode_solve('diff(y(x),x) = y(x) + x, y(x), x=0, 5, [y(0)=1]),
+    res2 : asymptotic_ode_solve_nth('diff(y(x),x,1) = y(x) + x, y(x), x=0, 5, [y(0)=1]),
+    ok : ok and (ratsimp(res1 - res2) = 0),
+    if ok then print("  1st-order vs nth-order methods agree")
+           else print("  Methods disagree"),
+
+    /* 2. Verify against known Taylor series */
+    /* y' = y, y(0) = 1 should give exactly e^x coefficients */
+    res1 : asymptotic_ode_solve('diff(y(x),x) = y(x), y(x), x=0, 8, [y(0)=1]),
+    ok : ok and asym_expect_exact("Exponential series verification", res1,
+        1 + x + x^2/2 + x^3/6 + x^4/24 + x^5/120 + x^6/720 + x^7/5040 + x^8/40320),
+
+    /* 3. Check that residuals behave correctly for truncated series */
+    ok : ok and asymptotic_ode_check('diff(y(x),x) = x*y(x) + exp(x), y(x), x=0, 6, [y(0)=1]),
+
+    print("Comparative Methods:", if ok then "PASS" else "FAIL"),
+    ok
+)$
+
+/* ========================================================================
+ *  MAIN TEST RUNNER
+ * ======================================================================== */
+
+run_comprehensive_tests() := block([all_ok:true, oldd2d, test_results:[]],
+    oldd2d : display2d,
+    display2d : false,  /* Ensure clean output */
+
+    print(""),
+    print("================================================================"),
+    print("        COMPREHENSIVE ASYMPTOTICS TEST SUITE"),
+    print("================================================================"),
+    print(""),
+
+    /* Run all test categories with safe execution */
+    block([result],
+        result : safe_test(test_phase1_basic),
+        test_results : cons(["Phase 1 Basic", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_phase1_nonlinear),
+        test_results : cons(["Phase 1 Nonlinear", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_phase1_nonzero_points),
+        test_results : cons(["Phase 1 Nonzero Points", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_phase1_edge_cases),
+        test_results : cons(["Phase 1 Edge Cases", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_phase2_second_order),
+        test_results : cons(["Phase 2 Second-Order", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_phase2_higher_order),
+        test_results : cons(["Phase 2 Higher-Order", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_phase2_nonzero_expansion),
+        test_results : cons(["Phase 2 Nonzero Expansion", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+      block([result],
+        result : safe_test(test_phase3_systems),
+        test_results : cons(["Phase 3 Systems", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_special_functions),
+        test_results : cons(["Special Functions", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_error_handling),
+        test_results : cons(["Error Handling", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_performance),
+        test_results : cons(["Performance", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_mathematical_properties),
+        test_results : cons(["Mathematical Properties", result], test_results),
+        all_ok : all_ok and result,
+        print("")
+    ),
+
+    block([result],
+        result : safe_test(test_comparative_methods),
+        test_results : cons(["Comparative Methods", result], test_results),
+        all_ok : all_ok and result
+    ),
+
+    print(""),
+    print("================================================================"),
+    print("                    SUMMARY OF RESULTS"),
+    print("================================================================"),
+
+    /* Print summary */
+    for result_pair in reverse(test_results) do (
+        print(sconcat(result_pair[1], ": ", if result_pair[2] then "PASS" else "FAIL"))
+    ),
+
+    print(""),
+    if all_ok then (
+        print("        ALL TESTS PASSED! Library is working correctly!"),
+        print("        Your Maxima asymptotics library is ready for use.")
+    ) else (
+        print("        SOME TESTS FAILED - Check output above for details"),
+        print("        Review failed test cases and verify expected results.")
+    ),
+    print("================================================================"),
+    print(""),
+
+    display2d : oldd2d,  /* Restore original setting */
+    all_ok
+)$
+
+/* ========================================================================
+ *  FOCUSED TEST RUNNERS (for debugging specific areas)
+ * ======================================================================== */
+
+run_phase1_tests() := block([all_ok:true, oldd2d],
+    oldd2d : display2d, display2d : false,
+    print("=== PHASE 1 FOCUSED TESTS ==="),
+    all_ok : all_ok and safe_test(test_phase1_basic),
+    all_ok : all_ok and safe_test(test_phase1_nonlinear),
+    all_ok : all_ok and safe_test(test_phase1_nonzero_points),
+    all_ok : all_ok and safe_test(test_phase1_edge_cases),
+    print(if all_ok then "PHASE 1: ALL PASS" else "PHASE 1: SOME FAILURES"),
+    display2d : oldd2d, all_ok
+)$
+
+run_phase2_tests() := block([all_ok:true, oldd2d],
+    oldd2d : display2d, display2d : false,
+    print("=== PHASE 2 FOCUSED TESTS ==="),
+    all_ok : all_ok and safe_test(test_phase2_second_order),
+    all_ok : all_ok and safe_test(test_phase2_higher_order),
+    all_ok : all_ok and safe_test(test_phase2_nonzero_expansion),
+    print(if all_ok then "PHASE 2: ALL PASS" else "PHASE 2: SOME FAILURES"),
+    display2d : oldd2d, all_ok
+)$
+
+run_quick_tests() := block([all_ok:true, oldd2d],
+    oldd2d : display2d, display2d : false,
+    print("=== QUICK VERIFICATION TESTS ==="),
+    all_ok : all_ok and safe_test(test_phase1_basic),
+    all_ok : all_ok and safe_test(test_phase2_second_order),
+    all_ok : all_ok and safe_test(test_error_handling),
+    print(if all_ok then "QUICK TESTS: ALL PASS" else "QUICK TESTS: SOME FAILURES"),
+    display2d : oldd2d, all_ok
+)$

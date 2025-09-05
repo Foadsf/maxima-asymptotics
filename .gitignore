@@ -45,5 +45,14 @@ docs/build/
 local/
 scratch/
 
+# Python byproducts
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+.env
+
 # miscellaneous
 repomix-output.xml

@@ -1,0 +1,5 @@
+load("asymptotics.mac")$
+load("comprehensive_test_suite.mac")$
+display2d:false$
+asym_debug:true$
+run_comprehensive_tests();

@@ -1,0 +1,12 @@
+/* Example 000: y' = y, y(0)=1, series about x=0 to order 8 */
+
+display2d:false$
+load("../../asymptotics.mac")$
+
+/* Solve and print */
+res : asymptotic_ode_solve('diff(y(x),x) = y(x), y(x), x=0, 8, [y(0)=1])$
+print("Maxima series (order 8):", string(res))$
+
+/* Residual check (through order-1) */
+ok : asymptotic_ode_check('diff(y(x),x) = y(x), y(x), x=0, 8, [y(0)=1])$
+print("Residual check:", ok)$
